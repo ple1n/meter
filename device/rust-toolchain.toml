@@ -1,0 +1,7 @@
+# This file was automatically generated.
+
+[toolchain]
+components = [ "rust-src", "rustfmt" ]
+targets = [
+    "thumbv7m-none-eabi"
+]

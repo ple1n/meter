@@ -1,0 +1,12 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.89"
+eframe = "0.29.1"
+egui = "0.29.1"
+egui_extras = "0.29.1"
+futures = "0.3.31"
+tokio = { version = "1.40.0", features = ["full"] }
