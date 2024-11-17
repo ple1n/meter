@@ -40,6 +40,7 @@ embassy-net = { version = "0.4.0", features = [
     "dhcpv4",
     "medium-ethernet",
 ] }
+ppproto = "0.2.1"
 [[bin]]
 name = "stm32f1"
 test = false
