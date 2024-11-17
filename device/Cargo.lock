@@ -1012,6 +1012,7 @@ dependencies = [
  "panic-halt",
  "panic-probe",
  "ppproto",
+ "serde",
  "static_cell",
 ]
 

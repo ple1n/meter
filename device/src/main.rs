@@ -5,8 +5,8 @@
 use core::future::pending;
 
 use cortex_m::asm;
-use defmt::*;
 
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
 
@@ -14,6 +14,8 @@ use embassy_usb::{
     class::cdc_acm::{CdcAcmClass, State},
     UsbDevice,
 };
+
+use defmt::*;
 
 use embassy_executor::Spawner;
 use embassy_stm32::{
@@ -25,7 +27,9 @@ use embassy_stm32::{
     usb::{self, Driver},
 };
 use embassy_time::{Duration, Timer};
+use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
+
 #[cfg(feature = "defmt")]
 use {defmt_rtt as _, panic_probe as _};
 
@@ -40,6 +44,30 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
     device.run().await
+}
+
+use embassy_sync::pipe;
+const QUEUE_CAP: usize = 4;
+
+/// link layer networking
+#[embassy_executor::task]
+async fn data_link(
+    mut class: CdcAcmClass<'static, UsbDriver>,
+    sx_down: pipe::Writer<'static, CriticalSectionRawMutex, QUEUE_CAP>,
+    rx_up: pipe::Reader<'static, CriticalSectionRawMutex, QUEUE_CAP>
+) -> ! {
+    let conf = ppproto::Config {
+        password: b"p",
+        username: b"u",
+    };
+    let mut proto = ppproto::pppos::PPPoS::new(conf);
+    proto.open().unwrap();
+    crate::todo!()
+}
+
+#[derive(Serialize, Deserialize)]
+enum LinkData {
+    Ping,
 }
 
 #[embassy_executor::main]
@@ -82,11 +110,23 @@ async fn main(spawner: Spawner) {
     );
 
     // Create classes on the builder.
-    let mut class =
+    let class =
         embassy_usb::class::cdc_acm::CdcAcmClass::new(&mut builder, STATE.init(State::new()), 64);
-    let mut usb = builder.build();
+    let usb = builder.build();
 
     unwrap!(spawner.spawn(usb_task(usb)));
+
+    use embassy_sync::pipe::Pipe;
+    type QueueType = LinkData;
+    // packets to host
+    static LINK_UP: StaticCell<Pipe<CriticalSectionRawMutex, QUEUE_CAP>> = StaticCell::new();
+    // from host
+    static LINK_DOWN: StaticCell<Pipe<CriticalSectionRawMutex, QUEUE_CAP>> = StaticCell::new();
+
+    let (rx_up, sx_up) = LINK_UP.init(Pipe::new()).split();
+    let (rx_down, sx_down) = LINK_DOWN.init(Pipe::new()).split();
+
+    unwrap!(spawner.spawn(data_link(class, sx_down, rx_up)));
 
     // Timer::after_millis(5).await;
     // let measure = [0x70u8, 0xac, 0x33, 0x00];

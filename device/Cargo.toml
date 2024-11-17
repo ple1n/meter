@@ -41,6 +41,7 @@ embassy-net = { version = "0.4.0", features = [
     "medium-ethernet",
 ] }
 ppproto = "0.2.1"
+serde = { version = "1.0.215", default-features = false, features = ["derive"] }
 [[bin]]
 name = "stm32f1"
 test = false
