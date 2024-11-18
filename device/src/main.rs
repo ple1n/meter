@@ -6,7 +6,12 @@ use core::future::pending;
 
 use cortex_m::asm;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_futures::{join, select};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::{Channel, Receiver, Sender},
+    pipe::{Reader, Writer},
+};
 #[cfg(not(feature = "defmt"))]
 use panic_halt as _;
 
@@ -27,6 +32,8 @@ use embassy_stm32::{
     usb::{self, Driver},
 };
 use embassy_time::{Duration, Timer};
+use ppproto::pppos::PPPoSAction;
+use ringbuffer::RingBuffer;
 use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 
@@ -46,23 +53,81 @@ async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
     device.run().await
 }
 
-use embassy_sync::pipe;
-const QUEUE_CAP: usize = 4;
+const LINK_CAP: usize = 4;
 
-/// link layer networking
+/// link layer networking running on PPP
 #[embassy_executor::task]
 async fn data_link(
     mut class: CdcAcmClass<'static, UsbDriver>,
-    sx_down: pipe::Writer<'static, CriticalSectionRawMutex, QUEUE_CAP>,
-    rx_up: pipe::Reader<'static, CriticalSectionRawMutex, QUEUE_CAP>
+    sx_down: Sender<'static, CriticalSectionRawMutex, LinkData, LINK_CAP>,
+    rx_up: Receiver<'static, CriticalSectionRawMutex, LinkData, LINK_CAP>,
 ) -> ! {
-    let conf = ppproto::Config {
-        password: b"p",
-        username: b"u",
-    };
-    let mut proto = ppproto::pppos::PPPoS::new(conf);
-    proto.open().unwrap();
-    crate::todo!()
+    let (mut sx, mut rx) = class.split();
+    loop {
+        info!("wait for usb");
+        
+        rx.wait_connection().await;
+        let conf = ppproto::Config {
+            password: b"p",
+            username: b"u",
+        };
+        let mut proto = ppproto::pppos::PPPoS::new(conf);
+        const BUF_SIZE: usize = 64;
+        let mut tbuf = [0; BUF_SIZE];
+        let mut rbuf = [0; BUF_SIZE];
+        
+        let mut up_buf = [0; BUF_SIZE];
+        // pointer
+        let mut consumed = 0usize;
+        let mut data_end = 0usize;
+
+        let mut read_buf = [0; BUF_SIZE];
+        proto.open().unwrap();
+
+        loop {
+            match select::select(rx.read_packet(&mut read_buf), rx_up.receive()).await {
+                select::Either::First(result) => match result {
+                    Ok(size) => {
+                        consumed = 0;
+                        data_end = size;
+                    },
+                    Err(e) => {
+                        warn!("{:?}", &e);
+                        break;
+                    }
+                },
+                select::Either::Second(packet) => {
+                    let bytes = postcard::to_slice(&packet, &mut up_buf[..]);
+                    match bytes {
+                        Ok(byt) => {
+                            proto.send(&byt, &mut tbuf).unwrap();
+                        }
+                        _ => (),
+                    }
+                }
+            }
+            loop {
+                let n = proto.consume(&read_buf[consumed..data_end], &mut rbuf);
+                consumed = n;
+                match proto.poll(&mut tbuf, &mut rbuf) {
+                    PPPoSAction::Transmit(n) => {
+                        unwrap!(sx.write_packet(&tbuf[..n]).await);
+                        tbuf.fill(0);
+                    }
+                    PPPoSAction::Received(n) => {
+                        let de: Result<LinkData, postcard::Error> = postcard::from_bytes(&rbuf[n]);
+                        match de {
+                            Ok(data) => {
+                                sx_down.send(data).await;
+                            }
+                            _ => (),
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,11 +137,31 @@ enum LinkData {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(Default::default());
+    use embassy_stm32::{bind_interrupts, peripherals, usb, Config};
+
+    let mut config = Config::default();
+    {
+        use embassy_stm32::rcc::*;
+
+        config.rcc.hse = Some(Hse {
+            freq: Hertz(8_000_000),
+            // Oscillator for bluepill, Bypass for nucleos.
+            mode: HseMode::Oscillator,
+        });
+        config.rcc.pll = Some(Pll {
+            src: PllSource::HSE,
+            prediv: PllPreDiv::DIV1,
+            mul: PllMul::MUL9,
+        });
+        config.rcc.sys = Sysclk::PLL1_P;
+        config.rcc.ahb_pre = AHBPrescaler::DIV1;
+        config.rcc.apb1_pre = APBPrescaler::DIV2;
+        config.rcc.apb2_pre = APBPrescaler::DIV1;
+    }
+    let mut p = embassy_stm32::init(config);
+
     let mut led = Output::new(p.PC13, Level::High, Speed::Low);
     let mut i2conf = i2c::Config::default();
-    i2conf.scl_pullup = true;
-    i2conf.sda_pullup = true;
 
     let mut i2c = I2c::new(
         p.I2C1,
@@ -92,11 +177,23 @@ async fn main(spawner: Spawner) {
     use embassy_stm32::usb::Driver;
     use embassy_usb::Builder;
 
-    let config = embassy_usb::Config::new(0xc0de, 1);
+    let mut config = embassy_usb::Config::new(0xc0de, 1);
+    config.manufacturer = Some("Plein");
+    config.product = Some("meter");
+
+    {
+        // BluePill board has a pull-up resistor on the D+ line.
+        // Pull the D+ pin down to send a RESET condition to the USB bus.
+        // This forced reset is needed only for development, without it host
+        // will not reset your device when you upload new firmware.
+        let _dp = Output::new(&mut p.PA12, Level::Low, Speed::Low);
+        Timer::after_millis(10).await;
+    }
+
     let driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
     static CONF_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-    static CTRLBUF: StaticCell<[u8; 7]> = StaticCell::new();
+    static CTRLBUF: StaticCell<[u8; 128]> = StaticCell::new();
 
     static STATE: StaticCell<State> = StaticCell::new();
 
@@ -106,7 +203,7 @@ async fn main(spawner: Spawner) {
         &mut CONF_DESC.init([0; 256])[..],
         &mut BOS_DESC.init([0; 256])[..],
         &mut [], // no msos descriptors
-        &mut CTRLBUF.init([0; 7])[..],
+        &mut CTRLBUF.init([0; 128])[..],
     );
 
     // Create classes on the builder.
@@ -116,17 +213,17 @@ async fn main(spawner: Spawner) {
 
     unwrap!(spawner.spawn(usb_task(usb)));
 
-    use embassy_sync::pipe::Pipe;
-    type QueueType = LinkData;
     // packets to host
-    static LINK_UP: StaticCell<Pipe<CriticalSectionRawMutex, QUEUE_CAP>> = StaticCell::new();
-    // from host
-    static LINK_DOWN: StaticCell<Pipe<CriticalSectionRawMutex, QUEUE_CAP>> = StaticCell::new();
+    static LINK_UP: StaticCell<Channel<CriticalSectionRawMutex, LinkData, LINK_CAP>> =
+        StaticCell::new();
+    // packets from host to device
+    static LINK_DOWN: StaticCell<Channel<CriticalSectionRawMutex, LinkData, LINK_CAP>> =
+        StaticCell::new();
 
-    let (rx_up, sx_up) = LINK_UP.init(Pipe::new()).split();
-    let (rx_down, sx_down) = LINK_DOWN.init(Pipe::new()).split();
+    let link_up = LINK_UP.init(Channel::new());
+    let link_down = LINK_DOWN.init(Channel::new());
 
-    unwrap!(spawner.spawn(data_link(class, sx_down, rx_up)));
+    unwrap!(spawner.spawn(data_link(class, link_down.sender(), link_up.receiver())));
 
     // Timer::after_millis(5).await;
     // let measure = [0x70u8, 0xac, 0x33, 0x00];

@@ -14,34 +14,34 @@ cortex-m = { version = "0.7.7", features = [
 cortex-m-rt = "0.7.3"
 defmt = { version = "0.3.8", optional = true }
 defmt-rtt = { version = "0.4.1", optional = true }
-embassy-executor = { version = "0.6.0", features = [
+embassy-executor = { path = "../../embassy/embassy-executor/", features = [
     "arch-cortex-m",
     "executor-thread",
     "integrated-timers",
     "nightly",
 ] }
-embassy-stm32 = { version = "0.1.0", features = [
-    "memory-x",
+embassy-stm32 = { path = "../../embassy/embassy-stm32/", features = [
+    "defmt",
     "stm32f103c6",
-    "time-driver-any",
-    "exti",
     "unstable-pac",
+    "memory-x",
+    "time-driver-any",
 ] }
-embassy-sync = "0.6.0"
-embassy-time = { version = "0.3.2", features = ["tick-hz-32_768"] }
+embassy-sync = { path = "../../embassy/embassy-sync/", version = "0.6.0" }
+embassy-time = { path = "../../embassy/embassy-time/", features = [
+    "tick-hz-32_768",
+] }
 panic-halt = "0.2.0"
 panic-probe = { version = "0.3.2", features = ["print-defmt"], optional = true }
 embassy-futures = "*"
-embassy-usb = { version = "0.3.0" }
+embassy-usb = { path = "../../embassy/embassy-usb/", version = "0.3.0" }
 static_cell = "2.1.0"
-embassy-net = { version = "0.4.0", features = [
-    "defmt",
-    "tcp",
-    "dhcpv4",
-    "medium-ethernet",
-] }
+
 ppproto = "0.2.1"
 serde = { version = "1.0.215", default-features = false, features = ["derive"] }
+ringbuffer = { version = "0.15.0", default-features = false }
+
+postcard = "1.0.10"
 [[bin]]
 name = "stm32f1"
 test = false
@@ -71,6 +71,7 @@ defmt = [
     "embassy-time/defmt-timestamp-uptime",
     "embassy-stm32/defmt",
     "embassy-usb/defmt",
+    "postcard/defmt",
 ]
 defmt-rtt = ["dep:defmt-rtt"]
 panic-probe = ["dep:panic-probe"]
