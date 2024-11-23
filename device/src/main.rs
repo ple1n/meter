@@ -4,6 +4,7 @@
 
 use core::future::pending;
 
+use common::{LinkFrame, PID, VID};
 use cortex_m::asm;
 
 use embassy_futures::{join, select};
@@ -33,7 +34,6 @@ use embassy_stm32::{
 };
 use embassy_time::{Duration, Timer};
 use ppproto::pppos::PPPoSAction;
-use ringbuffer::RingBuffer;
 use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 
@@ -55,42 +55,47 @@ async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
 
 const LINK_CAP: usize = 4;
 
+pub mod rpc;
+
 /// link layer networking running on PPP
 #[embassy_executor::task]
 async fn data_link(
-    mut class: CdcAcmClass<'static, UsbDriver>,
-    sx_down: Sender<'static, CriticalSectionRawMutex, LinkData, LINK_CAP>,
-    rx_up: Receiver<'static, CriticalSectionRawMutex, LinkData, LINK_CAP>,
+    class: CdcAcmClass<'static, UsbDriver>,
+    sx_down: Sender<'static, CriticalSectionRawMutex, LinkFrame, LINK_CAP>,
+    rx_up: Receiver<'static, CriticalSectionRawMutex, LinkFrame, LINK_CAP>,
 ) -> ! {
     let (mut sx, mut rx) = class.split();
     loop {
         info!("wait for usb");
-        
+
         rx.wait_connection().await;
         let conf = ppproto::Config {
             password: b"p",
             username: b"u",
         };
+
         let mut proto = ppproto::pppos::PPPoS::new(conf);
-        const BUF_SIZE: usize = 64;
+        const BUF_SIZE: usize = 256;
         let mut tbuf = [0; BUF_SIZE];
         let mut rbuf = [0; BUF_SIZE];
-        
+
         let mut up_buf = [0; BUF_SIZE];
         // pointer
         let mut consumed = 0usize;
         let mut data_end = 0usize;
 
         let mut read_buf = [0; BUF_SIZE];
+
         proto.open().unwrap();
 
         loop {
             match select::select(rx.read_packet(&mut read_buf), rx_up.receive()).await {
                 select::Either::First(result) => match result {
                     Ok(size) => {
+                        info!("read {}", size);
                         consumed = 0;
                         data_end = size;
-                    },
+                    }
                     Err(e) => {
                         warn!("{:?}", &e);
                         break;
@@ -102,37 +107,45 @@ async fn data_link(
                         Ok(byt) => {
                             proto.send(&byt, &mut tbuf).unwrap();
                         }
-                        _ => (),
+                        Err(e) => {
+                            warn!("sending; encode error");
+                        }
                     }
                 }
             }
             loop {
-                let n = proto.consume(&read_buf[consumed..data_end], &mut rbuf);
-                consumed = n;
+                if (&read_buf[consumed..data_end]).len() > 0 {
+                    info!("cons {} {}", consumed, data_end);
+                    info!("cons {:?}", &read_buf[consumed..data_end]);
+                    let n = proto.consume(&read_buf[consumed..data_end], &mut rbuf);
+                    consumed += n;
+                }
+                
                 match proto.poll(&mut tbuf, &mut rbuf) {
                     PPPoSAction::Transmit(n) => {
                         unwrap!(sx.write_packet(&tbuf[..n]).await);
                         tbuf.fill(0);
                     }
                     PPPoSAction::Received(n) => {
-                        let de: Result<LinkData, postcard::Error> = postcard::from_bytes(&rbuf[n]);
+                        info!("recv {:?}", &n);
+                        let de: Result<LinkFrame, postcard::Error> = postcard::from_bytes(&rbuf[n]);
                         match de {
                             Ok(data) => {
                                 sx_down.send(data).await;
                             }
-                            _ => (),
+                            Err(e) => {
+                                warn!("decode err");
+                            }
                         }
                     }
-                    _ => break,
+                    PPPoSAction::None => {
+                        info!("ppp:none {}", proto.status());
+                        break;
+                    },
                 }
             }
         }
     }
-}
-
-#[derive(Serialize, Deserialize)]
-enum LinkData {
-    Ping,
 }
 
 #[embassy_executor::main]
@@ -177,7 +190,7 @@ async fn main(spawner: Spawner) {
     use embassy_stm32::usb::Driver;
     use embassy_usb::Builder;
 
-    let mut config = embassy_usb::Config::new(0xc0de, 1);
+    let mut config = embassy_usb::Config::new(VID, PID);
     config.manufacturer = Some("Plein");
     config.product = Some("meter");
 
@@ -214,10 +227,10 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(usb_task(usb)));
 
     // packets to host
-    static LINK_UP: StaticCell<Channel<CriticalSectionRawMutex, LinkData, LINK_CAP>> =
+    static LINK_UP: StaticCell<Channel<CriticalSectionRawMutex, LinkFrame, LINK_CAP>> =
         StaticCell::new();
     // packets from host to device
-    static LINK_DOWN: StaticCell<Channel<CriticalSectionRawMutex, LinkData, LINK_CAP>> =
+    static LINK_DOWN: StaticCell<Channel<CriticalSectionRawMutex, LinkFrame, LINK_CAP>> =
         StaticCell::new();
 
     let link_up = LINK_UP.init(Channel::new());
@@ -244,8 +257,9 @@ async fn main(spawner: Spawner) {
     // info!("read {}, {}", buf, rx);
 
     loop {
-        led.toggle();
-        Timer::after_secs(1).await;
+        let re = link_down.receive().await;
+
+        info!("{:?}", &re);
     }
 
     // info!("exit");

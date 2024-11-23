@@ -15,7 +15,7 @@ cortex-m-rt = "0.7.3"
 defmt = { version = "0.3.8", optional = true }
 defmt-rtt = { version = "0.4.1", optional = true }
 embassy-executor = { path = "../../embassy/embassy-executor/", features = [
-    "arch-cortex-m",
+    "arch-cortex-m",    
     "executor-thread",
     "integrated-timers",
     "nightly",
@@ -39,9 +39,11 @@ static_cell = "2.1.0"
 
 ppproto = "0.2.1"
 serde = { version = "1.0.215", default-features = false, features = ["derive"] }
-ringbuffer = { version = "0.15.0", default-features = false }
 
 postcard = "1.0.10"
+heapless = { version = "0.8.0", features = ["serde"] }
+common = { version = "0.1.0", path = "../common" }
+
 [[bin]]
 name = "stm32f1"
 test = false
@@ -72,6 +74,8 @@ defmt = [
     "embassy-stm32/defmt",
     "embassy-usb/defmt",
     "postcard/defmt",
+    "heapless/defmt-03",
+    "ppproto/defmt"
 ]
 defmt-rtt = ["dep:defmt-rtt"]
 panic-probe = ["dep:panic-probe"]
