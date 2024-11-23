@@ -14,35 +14,48 @@ cortex-m = { version = "0.7.7", features = [
 cortex-m-rt = "0.7.3"
 defmt = { version = "0.3.8", optional = true }
 defmt-rtt = { version = "0.4.1", optional = true }
-embassy-executor = { path = "../../embassy/embassy-executor/", features = [
-    "arch-cortex-m",    
+embassy-executor = { version = "0.6.0", features = [
+    "arch-cortex-m",
     "executor-thread",
     "integrated-timers",
     "nightly",
 ] }
-embassy-stm32 = { path = "../../embassy/embassy-stm32/", features = [
+embassy-stm32 = { version = "0.1.0", features = [
     "defmt",
     "stm32f103c6",
     "unstable-pac",
     "memory-x",
     "time-driver-any",
 ] }
-embassy-sync = { path = "../../embassy/embassy-sync/", version = "0.6.0" }
-embassy-time = { path = "../../embassy/embassy-time/", features = [
-    "tick-hz-32_768",
-] }
+embassy-sync = { version = "0.6.0" }
 panic-halt = "0.2.0"
 panic-probe = { version = "0.3.2", features = ["print-defmt"], optional = true }
 embassy-futures = "*"
-embassy-usb = { path = "../../embassy/embassy-usb/", version = "0.3.0" }
+embassy-usb = { version = "0.3" }
 static_cell = "2.1.0"
 
-ppproto = "0.2.1"
 serde = { version = "1.0.215", default-features = false, features = ["derive"] }
-
-postcard = "1.0.10"
 heapless = { version = "0.8.0", features = ["serde"] }
 common = { version = "0.1.0", path = "../common" }
+
+postcard-schema = { version = "0.1.0", features = ["derive"] }
+postcard-rpc = { version = "0.10", features = ["embassy-usb-0_3-server"] }
+postcard = { version = "1.0.8" }
+embassy-time = { version = "0.3.2", features = ["tick-hz-32_768"] }
+
+[patch.crates-io]
+postcard-rpc = { path = "../postcard-rpc/source/postcard-rpc" }
+
+# embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+# embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-usb-driver = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy", rev = "c9abff53d77dfc71deb597ce93f358e25588775a" }
+
+
 
 [[bin]]
 name = "stm32f1"
@@ -69,13 +82,11 @@ defmt = [
     "embassy-executor/defmt",
     "embassy-sync/defmt",
     "embassy-futures/defmt",
-    "embassy-time/defmt",
-    "embassy-time/defmt-timestamp-uptime",
+    # "embassy-time/defmt",
+    # "embassy-time/defmt-timestamp-uptime",
     "embassy-stm32/defmt",
     "embassy-usb/defmt",
-    "postcard/defmt",
     "heapless/defmt-03",
-    "ppproto/defmt"
 ]
 defmt-rtt = ["dep:defmt-rtt"]
 panic-probe = ["dep:panic-probe"]

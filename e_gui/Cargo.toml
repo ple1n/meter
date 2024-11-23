@@ -11,9 +11,15 @@ eframe = "0.29.1"
 egui = "0.29.1"
 egui_extras = "0.29.1"
 futures = "0.3.31"
-postcard = { version = "1.0.10", features = ["use-std"] }
-ppproto = "0.2.1"
+postcard = { version = "1.0.10", features = ["use-std", "raw-nusb"] }
 serde = "1.0.215"
 serialport = "4.6.0"
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-serial = "5.4.4"
+
+[dependencies.postcard-rpc]
+version = "0.10"
+
+[dependencies.postcard-schema]
+version = "0.1"
+features = ["derive"]

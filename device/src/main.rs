@@ -4,7 +4,6 @@
 
 use core::future::pending;
 
-use common::{LinkFrame, PID, VID};
 use cortex_m::asm;
 
 use embassy_futures::{join, select};
@@ -21,8 +20,7 @@ use embassy_usb::{
     UsbDevice,
 };
 
-use defmt::*;
-
+use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
@@ -33,7 +31,16 @@ use embassy_stm32::{
     usb::{self, Driver},
 };
 use embassy_time::{Duration, Timer};
-use ppproto::pppos::PPPoSAction;
+use postcard_rpc::{
+    define_dispatch,
+    server::{
+        impls::embassy_usb_v0_3::{
+            dispatch_impl::{WireRxBuf, WireRxImpl, WireSpawnImpl, WireStorage, WireTxImpl},
+            PacketBuffers,
+        },
+        Dispatch, Server,
+    },
+};
 use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 
@@ -55,97 +62,36 @@ async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
 
 const LINK_CAP: usize = 4;
 
-pub mod rpc;
+type AppDriver = usb::Driver<'static, peripherals::USB>;
+type AppTx = WireTxImpl<embassy_sync::blocking_mutex::raw::ThreadModeRawMutex, AppDriver>;
+type AppRx = WireRxImpl<AppDriver>;
 
-/// link layer networking running on PPP
-#[embassy_executor::task]
-async fn data_link(
-    class: CdcAcmClass<'static, UsbDriver>,
-    sx_down: Sender<'static, CriticalSectionRawMutex, LinkFrame, LINK_CAP>,
-    rx_up: Receiver<'static, CriticalSectionRawMutex, LinkFrame, LINK_CAP>,
-) -> ! {
-    let (mut sx, mut rx) = class.split();
-    loop {
-        info!("wait for usb");
+pub struct Context {}
 
-        rx.wait_connection().await;
-        let conf = ppproto::Config {
-            password: b"p",
-            username: b"u",
-        };
+use common::*;
 
-        let mut proto = ppproto::pppos::PPPoS::new(conf);
-        const BUF_SIZE: usize = 256;
-        let mut tbuf = [0; BUF_SIZE];
-        let mut rbuf = [0; BUF_SIZE];
+define_dispatch! {
+    app: MyApp;
+    spawn_fn: spawn_fn;
+    tx_impl: AppTx;
+    spawn_impl: WireSpawnImpl;
+    context: Context;
 
-        let mut up_buf = [0; BUF_SIZE];
-        // pointer
-        let mut consumed = 0usize;
-        let mut data_end = 0usize;
+    endpoints: {
+        list: ENDPOINT_LIST;
 
-        let mut read_buf = [0; BUF_SIZE];
+        | EndpointTy                | kind      | handler                       |
+        | ----------                | ----      | -------                       |
+    };
+    topics_in: {
+        list: TOPICS_IN_LIST;
 
-        proto.open().unwrap();
-
-        loop {
-            match select::select(rx.read_packet(&mut read_buf), rx_up.receive()).await {
-                select::Either::First(result) => match result {
-                    Ok(size) => {
-                        info!("read {}", size);
-                        consumed = 0;
-                        data_end = size;
-                    }
-                    Err(e) => {
-                        warn!("{:?}", &e);
-                        break;
-                    }
-                },
-                select::Either::Second(packet) => {
-                    let bytes = postcard::to_slice(&packet, &mut up_buf[..]);
-                    match bytes {
-                        Ok(byt) => {
-                            proto.send(&byt, &mut tbuf).unwrap();
-                        }
-                        Err(e) => {
-                            warn!("sending; encode error");
-                        }
-                    }
-                }
-            }
-            loop {
-                if (&read_buf[consumed..data_end]).len() > 0 {
-                    info!("cons {} {}", consumed, data_end);
-                    info!("cons {:?}", &read_buf[consumed..data_end]);
-                    let n = proto.consume(&read_buf[consumed..data_end], &mut rbuf);
-                    consumed += n;
-                }
-                
-                match proto.poll(&mut tbuf, &mut rbuf) {
-                    PPPoSAction::Transmit(n) => {
-                        unwrap!(sx.write_packet(&tbuf[..n]).await);
-                        tbuf.fill(0);
-                    }
-                    PPPoSAction::Received(n) => {
-                        info!("recv {:?}", &n);
-                        let de: Result<LinkFrame, postcard::Error> = postcard::from_bytes(&rbuf[n]);
-                        match de {
-                            Ok(data) => {
-                                sx_down.send(data).await;
-                            }
-                            Err(e) => {
-                                warn!("decode err");
-                            }
-                        }
-                    }
-                    PPPoSAction::None => {
-                        info!("ppp:none {}", proto.status());
-                        break;
-                    },
-                }
-            }
-        }
-    }
+        | TopicTy                   | kind      | handler                       |
+        | ----------                | ----      | -------                       |
+    };
+    topics_out: {
+        list: TOPICS_OUT_LIST;
+    };
 }
 
 #[embassy_executor::main]
@@ -225,19 +171,6 @@ async fn main(spawner: Spawner) {
     let usb = builder.build();
 
     unwrap!(spawner.spawn(usb_task(usb)));
-
-    // packets to host
-    static LINK_UP: StaticCell<Channel<CriticalSectionRawMutex, LinkFrame, LINK_CAP>> =
-        StaticCell::new();
-    // packets from host to device
-    static LINK_DOWN: StaticCell<Channel<CriticalSectionRawMutex, LinkFrame, LINK_CAP>> =
-        StaticCell::new();
-
-    let link_up = LINK_UP.init(Channel::new());
-    let link_down = LINK_DOWN.init(Channel::new());
-
-    unwrap!(spawner.spawn(data_link(class, link_down.sender(), link_up.receiver())));
-
     // Timer::after_millis(5).await;
     // let measure = [0x70u8, 0xac, 0x33, 0x00];
     // loop {
@@ -257,9 +190,7 @@ async fn main(spawner: Spawner) {
     // info!("read {}, {}", buf, rx);
 
     loop {
-        let re = link_down.receive().await;
-
-        info!("{:?}", &re);
+        // info!("{:?}", &re);
     }
 
     // info!("exit");
