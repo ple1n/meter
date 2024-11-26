@@ -8,7 +8,7 @@ use cortex_m::asm;
 
 use embassy_futures::{join, select};
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
+    blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex},
     channel::{Channel, Receiver, Sender},
     pipe::{Reader, Writer},
 };
@@ -33,16 +33,16 @@ use embassy_stm32::{
 use embassy_time::{Duration, Timer};
 use postcard_rpc::{
     define_dispatch,
+    header::VarHeader,
     server::{
         impls::embassy_usb_v0_3::{
             dispatch_impl::{WireRxBuf, WireRxImpl, WireSpawnImpl, WireStorage, WireTxImpl},
             PacketBuffers,
-        },
-        Dispatch, Server,
+        }, Dispatch, Server, ServerError, WireRx
     },
 };
 use serde::{Deserialize, Serialize};
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 #[cfg(feature = "defmt")]
 use {defmt_rtt as _, panic_probe as _};
@@ -57,16 +57,24 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
-    device.run().await
+    loop {
+        device.run_until_suspend().await;
+        device.wait_resume().await;
+        info!("resume")
+    }
 }
 
-const LINK_CAP: usize = 4;
-
 type AppDriver = usb::Driver<'static, peripherals::USB>;
-type AppTx = WireTxImpl<embassy_sync::blocking_mutex::raw::ThreadModeRawMutex, AppDriver>;
+type AppTx = WireTxImpl<ThreadModeRawMutex, AppDriver>;
 type AppRx = WireRxImpl<AppDriver>;
+type BufStorage = PacketBuffers<1024, 1024>;
+type AppStorage = WireStorage<ThreadModeRawMutex, AppDriver, 256, 256, 64, 256>;
+type AppServer = Server<AppTx, AppRx, WireRxBuf, MyApp>;
 
 pub struct Context {}
+
+static PBUFS: ConstStaticCell<BufStorage> = ConstStaticCell::new(BufStorage::new());
+static STORAGE: AppStorage = AppStorage::new();
 
 use common::*;
 
@@ -82,6 +90,7 @@ define_dispatch! {
 
         | EndpointTy                | kind      | handler                       |
         | ----------                | ----      | -------                       |
+        | PingEndpoint              | blocking  |   ping_handler                |
     };
     topics_in: {
         list: TOPICS_IN_LIST;
@@ -92,6 +101,12 @@ define_dispatch! {
     topics_out: {
         list: TOPICS_OUT_LIST;
     };
+}
+
+fn ping_handler(_context: &mut Context, _header: VarHeader, rqst: u32) -> u32 {
+    info!("ping");
+    
+    rqst
 }
 
 #[embassy_executor::main]
@@ -139,7 +154,10 @@ async fn main(spawner: Spawner) {
     let mut config = embassy_usb::Config::new(VID, PID);
     config.manufacturer = Some("Plein");
     config.product = Some("meter");
-
+    config.device_class = 0xEF;
+    config.device_sub_class = 0x02;
+    config.device_protocol = 0x01;
+    config.composite_with_iads = true;
     {
         // BluePill board has a pull-up resistor on the D+ line.
         // Pull the D+ pin down to send a RESET condition to the USB bus.
@@ -150,27 +168,35 @@ async fn main(spawner: Spawner) {
     }
 
     let driver = Driver::new(p.USB, Irqs, p.PA12, p.PA11);
-    static CONF_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-    static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
-    static CTRLBUF: StaticCell<[u8; 128]> = StaticCell::new();
-
-    static STATE: StaticCell<State> = StaticCell::new();
-
-    let mut builder = Builder::new(
-        driver,
-        config,
-        &mut CONF_DESC.init([0; 256])[..],
-        &mut BOS_DESC.init([0; 256])[..],
-        &mut [], // no msos descriptors
-        &mut CTRLBUF.init([0; 128])[..],
+    let pbufs = PBUFS.take();
+    let context = Context {};
+    let dispatcher = MyApp::new(context, spawner.into());
+    let vkk = dispatcher.min_key_len();
+    let (device, tx_impl, rx_impl) = STORAGE.init(driver, config, pbufs.tx_buf.as_mut_slice());
+    let mut server: AppServer = Server::new(
+        &tx_impl,
+        rx_impl,
+        pbufs.rx_buf.as_mut_slice(),
+        dispatcher,
+        vkk,
     );
-
-    // Create classes on the builder.
-    let class =
-        embassy_usb::class::cdc_acm::CdcAcmClass::new(&mut builder, STATE.init(State::new()), 64);
-    let usb = builder.build();
-
-    unwrap!(spawner.spawn(usb_task(usb)));
+    spawner.must_spawn(usb_task(device));
+    
+    loop {
+        info!("wait usb");
+        let x = server.run().await;
+        match x {
+            ServerError::TxFatal(s) => {
+                info!("tx error {:?}", s as usize)
+            },
+            ServerError::RxFatal(r) => {
+                info!("rx error")
+            }
+        }
+        Timer::after_secs(1).await;
+        
+    }
+    
     // Timer::after_millis(5).await;
     // let measure = [0x70u8, 0xac, 0x33, 0x00];
     // loop {
@@ -188,10 +214,6 @@ async fn main(spawner: Spawner) {
     // let mut buf = [0u8; 4];
     // let rx = i2c.read(0, &mut buf).await;
     // info!("read {}, {}", buf, rx);
-
-    loop {
-        // info!("{:?}", &re);
-    }
 
     // info!("exit");
 }

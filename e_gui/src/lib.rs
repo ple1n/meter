@@ -3,4 +3,3 @@
 pub use derive_new::new;
 
 pub use anyhow::Result;
-pub mod rpc;
